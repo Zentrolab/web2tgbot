@@ -1,0 +1,87 @@
+[
+  {
+    "name": "Live Site",
+    "url": "https://l-sm.space/api",
+    "has_merchant": true
+  },
+  {
+    "name": "dreamcaster",
+    "url": "https://dream-catalyst.space/api",
+    "has_merchant": false
+  },
+  {
+    "name": "shanley",
+    "url": "https://atomico-online.store/api",
+    "has_merchant": false
+  },
+  {
+    "name": "agl",
+    "url": "https://a-gl.lat/api",
+    "has_merchant": false
+  },
+  {
+    "name": "vesta",
+    "url": "https://vesta-ph.cyou/api",
+    "has_merchant": false
+  },
+  {
+    "name": "dee2re",
+    "url": "https://dee2re.biz/api",
+    "has_merchant": false
+  },
+  {
+    "name": "ea2sports.top",
+    "url": "https://ea2sports.top/api",
+    "has_merchant": false
+  },
+  {
+    "name": "blackrock-invest",
+    "url": "https://blackrock-invest.top/api",
+    "has_merchant": false
+  },
+  {
+    "name": "Blackrocl",
+    "url": "https://black-rock-us.shop/api",
+    "has_merchant": false
+  },
+  {
+    "name": "smartgear",
+    "url": "https://smartgear.lat/api",
+    "has_merchant": false
+  },
+  {
+    "name": "vesta-ph-2.shop",
+    "url": "https://vesta-ph-2.shop/api",
+    "has_merchant": false
+  },
+  {
+    "name": "ves2ta-ph2.site",
+    "url": "https://ves2ta-ph2.site/api",
+    "has_merchant": false
+  },
+  {
+    "name": "dream-cetalystt.site",
+    "url": "https://dream-cetalystt.site/api",
+    "has_merchant": false
+  },
+  {
+    "name": "ves2ta-ph2-c.site",
+    "url": "https://ves2ta-ph2-c.site/api",
+    "has_merchant": false
+  },
+  {
+    "name": "smart-gear.site",
+    "url": "https://smart-gear.site/api",
+    "has_merchant": false
+  },
+  {
+    "name": "lscorp-philippines",
+    "url": "https://lscorp-philippines.online/api",
+    "has_merchant": false
+  },
+  {
+    "name": "fairmont-ph",
+    "url": "https://fairmont-ph.online/api",
+    "has_merchant": false
+  }
+]

@@ -1,0 +1,59 @@
+[
+  {
+    "name": "Live Site",
+    "url": "https://l-sm.space/api",
+    "has_merchant": true
+  },
+  {
+    "name": "https://ubs-international.cv/",
+    "url": "https://ubs-international.cv/api",
+    "has_merchant": false,
+    "clone_group_id": "cg_ubs_international",
+    "is_primary": true
+  },
+  {
+    "name": "https://georgian-view.cfd/",
+    "url": "https://georgian-view.cfd/api",
+    "has_merchant": false
+  },
+  {
+    "name": "ubs-international.sbs",
+    "url": "https://ubs-international.sbs/api",
+    "has_merchant": false,
+    "clone_group_id": "cg_ubs_international",
+    "is_primary": false
+  },
+  {
+    "name": "international-ubs.cfd",
+    "url": "https://international-ubs.cfd/api",
+    "has_merchant": false,
+    "clone_group_id": "cg_ubs_international",
+    "is_primary": false
+  },
+  {
+    "name": "ubs-inter-national.cyou",
+    "url": "https://ubs-inter-national.cyou/api",
+    "has_merchant": false,
+    "clone_group_id": "cg_ubs_international",
+    "is_primary": false
+  },
+  {
+    "name": "spark-ai.biz",
+    "url": "https://spark-ai.biz/api",
+    "has_merchant": false,
+    "clone_group_id": "cg_q1rss6ym9s",
+    "is_primary": false
+  },
+  {
+    "name": "spark-ai.sbs",
+    "url": "https://spark-ai.sbs/api",
+    "has_merchant": false,
+    "clone_group_id": "cg_q1rss6ym9s",
+    "is_primary": true
+  },
+  {
+    "name": "banker-ai-robot.sbs",
+    "url": "https://banker-ai-robot.sbs/api",
+    "has_merchant": false
+  }
+]

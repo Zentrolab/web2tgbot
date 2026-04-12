@@ -1,0 +1,50 @@
+[
+  {
+    "name": "a-gl.lat",
+    "url": "https://a-gl.lat/api",
+    "has_merchant": false,
+    "zone_id": "d3c1d8ced351d114b3c67bb3f1367271",
+    "whitelisted_countries": [
+      "PH",
+      "SG",
+      "HK",
+      "JP",
+      "KW",
+      "SA",
+      "AE",
+      "QA",
+      "OM",
+      "BH"
+    ],
+    "enable_country_whitelist": false
+  },
+  {
+    "name": "greenfieldph.cfd",
+    "url": "https://greenfieldph.cfd/api",
+    "has_merchant": false
+  },
+  {
+    "name": "aiforex-online.lat",
+    "url": "https://aiforex-online.lat/api",
+    "has_merchant": false,
+    "clone_group_id": "cg_aiforex_online",
+    "is_primary": true
+  },
+  {
+    "name": "grow-rich.click",
+    "url": "https://grow-rich.click/api",
+    "has_merchant": false
+  },
+  {
+    "name": "aiforex-online.cfd",
+    "url": "https://aiforex-online.cfd/api",
+    "has_merchant": false,
+    "clone_group_id": "cg_aiforex_online",
+    "is_primary": false
+  },
+  {
+    "name": "phminer.sbs",
+    "url": "https://phminer.sbs/api",
+    "has_merchant": false
+  }
+]
