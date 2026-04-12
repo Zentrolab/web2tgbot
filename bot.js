@@ -8543,3 +8543,33 @@ bot.getMe().then((botInfo) => {
 
 console.log("🤖 System Info Bot is running...");
 console.log(`📂 Data is stored in: ${USERS_DIR}`);
+
+// ==================== KEEP-ALIVE FOR RENDER FREE TIER ====================
+const http = require("http");
+const PORT = process.env.PORT || 3000;
+
+const server = http.createServer((req, res) => {
+  if (req.url === "/health") {
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("OK");
+  } else {
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("Bot is running");
+  }
+});
+
+server.listen(PORT, () => {
+  console.log(`🌐 Keep-alive server running on port ${PORT}`);
+});
+
+// Self-ping every 14 minutes to prevent Render free tier spin-down
+const RENDER_URL = process.env.RENDER_EXTERNAL_URL;
+if (RENDER_URL) {
+  setInterval(() => {
+    https.get(`${RENDER_URL}/health`, (res) => {
+      console.log(`♻️ Keep-alive ping: ${res.statusCode}`);
+    }).on("error", (err) => {
+      console.error("Keep-alive ping failed:", err.message);
+    });
+  }, 14 * 60 * 1000); // 14 minutes
+}
