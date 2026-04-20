@@ -21,30 +21,61 @@
   {
     "name": "greenfieldph.cfd",
     "url": "https://greenfieldph.cfd/api",
-    "has_merchant": false
+    "has_merchant": false,
+    "zone_id": "cfa8f2fac90ede2927b640ba3e8e143c",
+    "enable_country_whitelist": false
   },
   {
     "name": "aiforex-online.lat",
     "url": "https://aiforex-online.lat/api",
     "has_merchant": false,
     "clone_group_id": "cg_aiforex_online",
-    "is_primary": true
+    "is_primary": true,
+    "zone_id": "9123038edf311298886ba642b38d0398",
+    "enable_country_whitelist": false
   },
   {
     "name": "grow-rich.click",
     "url": "https://grow-rich.click/api",
-    "has_merchant": false
+    "has_merchant": false,
+    "zone_id": "f3fcb7df56281b9edf46af19b263b996",
+    "enable_country_whitelist": false
   },
   {
     "name": "aiforex-online.cfd",
     "url": "https://aiforex-online.cfd/api",
     "has_merchant": false,
     "clone_group_id": "cg_aiforex_online",
-    "is_primary": false
+    "is_primary": false,
+    "zone_id": "9935f5da2fb31dd1a12cb7d77038d32b",
+    "enable_country_whitelist": false
   },
   {
     "name": "phminer.sbs",
     "url": "https://phminer.sbs/api",
-    "has_merchant": false
+    "has_merchant": false,
+    "zone_id": "2670a3afbcfeaa9472a69fac25232a84",
+    "enable_country_whitelist": false
+  },
+  {
+    "name": "legendofconstellation.cfd",
+    "url": "https://legendofconstellation.cfd/api",
+    "has_merchant": false,
+    "zone_id": "c281d0d5665a0d3ec11dcfa6548fa090",
+    "enable_country_whitelist": false
+  },
+  {
+    "name": "happy-ranch.cyou",
+    "url": "https://happy-ranch.cyou/api",
+    "has_merchant": false,
+    "zone_id": "ee19da7c3bfc85ff0a483e0651aa7231",
+    "enable_country_whitelist": false
+  },
+  {
+    "name": "pcgo.homes",
+    "url": "https://pcgo.homes/api",
+    "has_merchant": false,
+    "zone_id": "21e8ee2ff15965b2399c126a245fbf43",
+    "enable_country_whitelist": false
   }
 ]

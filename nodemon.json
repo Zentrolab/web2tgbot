@@ -1,7 +1,16 @@
 {
+  "watch": [
+    "*.js",
+    "*.json",
+    ".env",
+    "security/**/*.js",
+    "telegrambot/**/*.js"
+  ],
   "ignore": [
-    "domains.json",
-    "backups/*",
+    "users/**",
+    "backups/**",
+    "production/**",
+    "sessions.json",
     "*.log"
   ]
 }

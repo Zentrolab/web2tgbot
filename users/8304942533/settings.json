@@ -1,0 +1,9 @@
+{
+  "auto_cf_waf": false,
+  "cf_waf_options": {
+    "enablePhOnly": false,
+    "enableVpnBlocking": true,
+    "enableAsnWhitelist": true,
+    "enableCountryWhitelist": false
+  }
+}

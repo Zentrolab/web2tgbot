@@ -47,31 +47,44 @@ const getUserSettingsFile = (chatId) => {
   return path.join(userFolder, "settings.json");
 };
 
+const getDefaultCfWafOptions = () => ({
+  enablePhOnly: false,
+  enableVpnBlocking: false,
+  enableAsnWhitelist: true,
+  enableCountryWhitelist: false,
+});
+
+const normalizeCfWafOptions = (options = {}) => ({
+  ...getDefaultCfWafOptions(),
+  ...(options || {}),
+});
+
+const normalizeUserSettings = (settings = {}) => ({
+  ...(settings || {}),
+  auto_cf_waf: Boolean(settings.auto_cf_waf),
+  cf_waf_options: normalizeCfWafOptions(settings.cf_waf_options),
+});
+
 // Load User Settings
 const loadSettings = (chatId) => {
   try {
     const settingsFile = getUserSettingsFile(chatId);
     if (fs.existsSync(settingsFile)) {
-      return JSON.parse(fs.readFileSync(settingsFile, "utf8"));
+      return normalizeUserSettings(
+        JSON.parse(fs.readFileSync(settingsFile, "utf8")),
+      );
     }
   } catch (err) {
     console.error(`Error reading settings.json for user ${chatId}:`, err);
   }
-  return {
-    auto_cf_waf: false,
-    cf_waf_options: {
-      enablePhOnly: false,
-      enableVpnBlocking: false,
-      enableAsnWhitelist: true, // Default to true as per user request
-    },
-  };
+  return normalizeUserSettings();
 };
 
 // Save User Settings
 const saveSettings = (chatId, settings) => {
   fs.writeFileSync(
     getUserSettingsFile(chatId),
-    JSON.stringify(settings, null, 2),
+    JSON.stringify(normalizeUserSettings(settings), null, 2),
   );
 };
 
@@ -473,17 +486,194 @@ const getDomainFromUrl = (str) => {
   return domain.toLowerCase();
 };
 
+const getTrackedDomainName = (domainData = {}) => {
+  return getDomainFromUrl(domainData.name || domainData.domain || domainData.url);
+};
+
+const findTrackedDomainEntry = (chatId, domainName) => {
+  const normalizedDomain = getDomainFromUrl(domainName);
+  return loadDomains(chatId).find(
+    (domainData) => getTrackedDomainName(domainData) === normalizedDomain,
+  );
+};
+
+const buildDomainWafOptions = (baseOptions, domainData = {}) => {
+  const options = normalizeCfWafOptions(baseOptions);
+  return {
+    ...options,
+    whitelistedCountries: Array.isArray(domainData.whitelisted_countries)
+      ? domainData.whitelisted_countries
+      : undefined,
+  };
+};
+
+const getEnabledWafProfileLabels = (options) => {
+  const normalizedOptions = normalizeCfWafOptions(options);
+  const labels = [];
+
+  if (normalizedOptions.enableAsnWhitelist) labels.push("PH ASN Check");
+  if (normalizedOptions.enablePhOnly) labels.push("PH Only Check");
+  if (normalizedOptions.enableVpnBlocking) labels.push("VPN/Proxy Check");
+  if (normalizedOptions.enableCountryWhitelist)
+    labels.push("Country Whitelist");
+
+  return labels;
+};
+
+const ALL_WAF_PROFILE_LABELS = [
+  "PH ASN Check",
+  "PH Only Check",
+  "VPN/Proxy Check",
+  "Country Whitelist",
+];
+
+const getPriorityBypassIpsText = () => {
+  const ips = cloudflare.getPriorityBypassIps();
+  return ips.length > 0 ? ips.join(", ") : "Not configured";
+};
+
+const getDisabledCfWafOptions = () => ({
+  enablePhOnly: false,
+  enableVpnBlocking: false,
+  enableAsnWhitelist: false,
+  enableCountryWhitelist: false,
+});
+
+const getTrackedDomainsForUser = (chatId, domains = loadDomains(chatId)) => {
+  const trackedDomains = [];
+  const seenDomains = new Set();
+
+  domains.forEach((domainData) => {
+    const domainName = getTrackedDomainName(domainData);
+    if (!domainName || seenDomains.has(domainName)) {
+      return;
+    }
+
+    seenDomains.add(domainName);
+    trackedDomains.push({ domainName, domainData });
+  });
+
+  return trackedDomains;
+};
+
+const applyWafOptionsToTrackedDomains = async (chatId, baseOptions) => {
+  const domains = loadDomains(chatId);
+  const trackedDomains = getTrackedDomainsForUser(chatId, domains);
+  const successfulDomains = [];
+  const failedDomains = [];
+
+  for (const trackedDomain of trackedDomains) {
+    const { domainName, domainData } = trackedDomain;
+
+    try {
+      let zoneId = domainData.zone_id;
+
+      if (!zoneId) {
+        const zoneRes = await cloudflare.getZoneId(domainName);
+        if (!zoneRes.success) {
+          throw new Error(zoneRes.message || "Zone not found");
+        }
+
+        zoneId = zoneRes.zoneId;
+        domainData.zone_id = zoneId;
+      }
+
+      const wafOptions = buildDomainWafOptions(baseOptions, domainData);
+      const wafResult = await cloudflare.updateWafRules(zoneId, wafOptions);
+
+      if (!wafResult.success) {
+        throw new Error(wafResult.message || "Protection update failed");
+      }
+
+      domainData.enable_country_whitelist = Boolean(
+        wafOptions.enableCountryWhitelist,
+      );
+      successfulDomains.push(domainName);
+    } catch (err) {
+      failedDomains.push({
+        domain: domainName,
+        message: err.message || "Unknown error",
+      });
+    }
+  }
+
+  saveDomains(chatId, domains);
+
+  return {
+    trackedDomains,
+    successfulDomains,
+    failedDomains,
+  };
+};
+
+const backfillPriorityBypassToTrackedDomains = async (chatId) => {
+  const domains = loadDomains(chatId);
+  const trackedDomains = getTrackedDomainsForUser(chatId, domains);
+  const successfulDomains = [];
+  const failedDomains = [];
+
+  for (const trackedDomain of trackedDomains) {
+    const { domainName, domainData } = trackedDomain;
+
+    try {
+      let zoneId = domainData.zone_id;
+
+      if (!zoneId) {
+        const zoneRes = await cloudflare.getZoneId(domainName);
+        if (!zoneRes.success) {
+          throw new Error(zoneRes.message || "Zone not found");
+        }
+
+        zoneId = zoneRes.zoneId;
+        domainData.zone_id = zoneId;
+      }
+
+      const bypassResult = await cloudflare.ensurePriorityBypassIps(zoneId);
+      if (!bypassResult.success) {
+        throw new Error(bypassResult.message || "Callback bypass failed");
+      }
+
+      successfulDomains.push(domainName);
+    } catch (err) {
+      failedDomains.push({
+        domain: domainName,
+        message: err.message || "Unknown error",
+      });
+    }
+  }
+
+  saveDomains(chatId, domains);
+
+  return {
+    trackedDomains,
+    successfulDomains,
+    failedDomains,
+  };
+};
+
+const formatBulkWafResults = (items, icon) => {
+  if (!items.length) {
+    return "None";
+  }
+
+  return items
+    .slice(0, 10)
+    .map((item) => {
+      if (typeof item === "string") {
+        return `${icon} <b>${escapeHtml(item)}</b>`;
+      }
+
+      return `${icon} <b>${escapeHtml(item.domain)}</b> - ${escapeHtml(item.message)}`;
+    })
+    .join("\n");
+};
+
 const isDomainOwner = (chatId, domain) => {
   const userDomainsData = loadDomains(chatId);
   const domainToMatch = domain.toLowerCase();
-  return userDomainsData.some((d) => {
-    const trackedName = (d.name || "").toLowerCase();
-    const trackedDomain = (d.domain || "").toLowerCase();
-    return (
-      getDomainFromUrl(trackedName) === domainToMatch ||
-      getDomainFromUrl(trackedDomain) === domainToMatch
-    );
-  });
+  return userDomainsData.some(
+    (domainData) => getTrackedDomainName(domainData) === domainToMatch,
+  );
 };
 
 // Save Domains to JSON (Per User)
@@ -501,13 +691,7 @@ const updateDomainZoneId = (chatId, domainName, zoneId) => {
   const domainToMatch = domainName.toLowerCase();
 
   for (const d of domains) {
-    const trackedName = (d.name || "").toLowerCase();
-    const trackedDomain = (d.domain || "").toLowerCase();
-
-    if (
-      getDomainFromUrl(trackedName) === domainToMatch ||
-      getDomainFromUrl(trackedDomain) === domainToMatch
-    ) {
+    if (getTrackedDomainName(d) === domainToMatch) {
       d.zone_id = zoneId;
       updated = true;
     }
@@ -519,6 +703,20 @@ const updateDomainZoneId = (chatId, domainName, zoneId) => {
       JSON.stringify(domains, null, 2),
     );
   }
+  return updated;
+};
+
+const updateDomainCountryWhitelistState = (domains, domainName, enabled) => {
+  const normalizedDomain = getDomainFromUrl(domainName);
+  let updated = false;
+
+  domains.forEach((domainData) => {
+    if (getTrackedDomainName(domainData) === normalizedDomain) {
+      domainData.enable_country_whitelist = enabled;
+      updated = true;
+    }
+  });
+
   return updated;
 };
 
@@ -902,6 +1100,30 @@ const getCloudflareManagementKeyboard = (chatId) => {
         {
           text: `${options.enableVpnBlocking ? "✅" : "❌"} VPN Blocking`,
           callback_data: "toggle_cf_waf_vpn",
+        },
+      ],
+      [
+        {
+          text: `${options.enableCountryWhitelist ? "✅" : "❌"} Country Whitelist`,
+          callback_data: "toggle_cf_waf_country",
+        },
+      ],
+      [
+        {
+          text: "🛡️ Protect All My Domains",
+          callback_data: "cf_apply_waf_all",
+        },
+      ],
+      [
+        {
+          text: "🚫 Disable All My Domains",
+          callback_data: "cf_disable_waf_all",
+        },
+      ],
+      [
+        {
+          text: "🔁 Force Bypass IPs On All",
+          callback_data: "cf_backfill_callback_ip",
         },
       ],
       [
@@ -1556,9 +1778,13 @@ bot.on("message", async (msg) => {
           bot.sendMessage(chatId, `🛡️ <b>Applying WAF Protection...</b>`, {
             parse_mode: "HTML",
           });
+          const wafOptions = buildDomainWafOptions(
+            settings.cf_waf_options,
+            findTrackedDomainEntry(chatId, domain),
+          );
           const wafResult = await cloudflare.updateWafRules(
             result.zoneId,
-            settings.cf_waf_options,
+            wafOptions,
           );
           if (wafResult.success) {
             wafMessage = "\n✅ <b>WAF Protection:</b> Applied successfully!";
@@ -2208,7 +2434,13 @@ bot.on("message", async (msg) => {
           `🛡️ <b>Auto-WAF:</b> Applying rules to <b>${domain}</b>...`,
           { parse_mode: "HTML" },
         );
-        await cloudflare.updateWafRules(cfRes.zoneId, settings.cf_waf_options);
+        await cloudflare.updateWafRules(
+          cfRes.zoneId,
+          buildDomainWafOptions(
+            settings.cf_waf_options,
+            findTrackedDomainEntry(chatId, domain),
+          ),
+        );
       }
 
       bot.sendMessage(
@@ -2313,7 +2545,10 @@ bot.on("message", async (msg) => {
           );
           await cloudflare.updateWafRules(
             cfRes.zoneId,
-            settings.cf_waf_options,
+            buildDomainWafOptions(
+              settings.cf_waf_options,
+              findTrackedDomainEntry(chatId, input),
+            ),
           );
         }
 
@@ -4218,7 +4453,7 @@ Select an option below:
   // 6.5.1 Cloudflare Management Menu
   if (data === "cf_management_menu") {
     bot.editMessageText(
-      `⚙️ <b>Cloudflare Global Settings</b>\n━━━━━━━━━━━━━━━━━━\nConfigure automatic protection for new domains.`,
+      `⚙️ <b>Cloudflare Global Settings</b>\n━━━━━━━━━━━━━━━━━━\nConfigure automatic protection for new domains and apply the current profile to all tracked domains.`,
       {
         chat_id: chatId,
         message_id: msg.message_id,
@@ -4259,6 +4494,9 @@ Select an option below:
     if (option === "vpn")
       settings.cf_waf_options.enableVpnBlocking =
         !settings.cf_waf_options.enableVpnBlocking;
+    if (option === "country")
+      settings.cf_waf_options.enableCountryWhitelist =
+        !settings.cf_waf_options.enableCountryWhitelist;
 
     saveSettings(chatId, settings);
     bot.editMessageReplyMarkup(getCloudflareManagementKeyboard(chatId), {
@@ -4266,6 +4504,253 @@ Select an option below:
       message_id: msg.message_id,
     });
     bot.answerCallbackQuery(callbackQuery.id, { text: "Setting Updated" });
+    return;
+  }
+
+  if (data === "cf_apply_waf_all") {
+    const settings = loadSettings(chatId);
+    const enabledProtections = getEnabledWafProfileLabels(
+      settings.cf_waf_options,
+    );
+
+    if (enabledProtections.length === 0) {
+      bot.answerCallbackQuery(callbackQuery.id, {
+        text: "Enable at least one protection first.",
+      });
+      bot.editMessageText(
+        `⚠️ <b>No protection selected</b>\n\nEnable at least one Cloudflare protection in this menu before using bulk apply.`,
+        {
+          chat_id: chatId,
+          message_id: msg.message_id,
+          parse_mode: "HTML",
+          reply_markup: getCloudflareManagementKeyboard(chatId),
+        },
+      );
+      return;
+    }
+
+    const trackedDomains = getTrackedDomainsForUser(chatId);
+
+    if (trackedDomains.length === 0) {
+      bot.answerCallbackQuery(callbackQuery.id, {
+        text: "No tracked domains found.",
+      });
+      bot.editMessageText(
+        `ℹ️ <b>No tracked domains found</b>\n\nAdd domains to your own list first, then use this one-click protection action.`,
+        {
+          chat_id: chatId,
+          message_id: msg.message_id,
+          parse_mode: "HTML",
+          reply_markup: getCloudflareManagementKeyboard(chatId),
+        },
+      );
+      return;
+    }
+
+    bot.answerCallbackQuery(callbackQuery.id, {
+      text: `Applying protection to ${trackedDomains.length} domains...`,
+    });
+
+    const profileText = enabledProtections
+      .map((label) => `- ${label}`)
+      .join("\n");
+
+    bot.editMessageText(
+      `🛡️ <b>Applying Cloudflare protection</b>\n\n<b>Tracked Domains:</b> ${trackedDomains.length}\n<b>Profile:</b>\n${profileText}\n\n<i>Priority bypass IPs active:</i>\n<code>${escapeHtml(getPriorityBypassIpsText())}</code>`,
+      {
+        chat_id: chatId,
+        message_id: msg.message_id,
+        parse_mode: "HTML",
+      },
+    );
+
+    const { successfulDomains, failedDomains } =
+      await applyWafOptionsToTrackedDomains(chatId, settings.cf_waf_options);
+
+    const successPreview = formatBulkWafResults(successfulDomains, "✅");
+    const failurePreview = formatBulkWafResults(failedDomains, "❌");
+    const successOverflow =
+      successfulDomains.length > 10
+        ? `\n...and ${successfulDomains.length - 10} more.`
+        : "";
+    const failureOverflow =
+      failedDomains.length > 10
+        ? `\n...and ${failedDomains.length - 10} more.`
+        : "";
+
+    bot.editMessageText(
+      `🛡️ <b>Bulk protection complete</b>\n\n<b>Applied Profile:</b>\n${profileText}\n\n<b>Success:</b> ${successfulDomains.length}/${trackedDomains.length}\n${successPreview}${successOverflow}\n\n<b>Failed:</b> ${failedDomains.length}\n${failurePreview}${failureOverflow}\n\n<i>Priority bypass IPs:</i>\n<code>${escapeHtml(getPriorityBypassIpsText())}</code>`,
+      {
+        chat_id: chatId,
+        message_id: msg.message_id,
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [
+              {
+                text: "⬅️ Back to Cloudflare Settings",
+                callback_data: "cf_management_menu",
+              },
+            ],
+            [
+              {
+                text: "🏠 Cloudflare Menu",
+                callback_data: "cloudflare_menu",
+              },
+            ],
+          ],
+        },
+      },
+    );
+    return;
+  }
+
+  if (data === "cf_disable_waf_all") {
+    const disabledOptions = getDisabledCfWafOptions();
+    const domains = loadDomains(chatId);
+    const trackedDomains = getTrackedDomainsForUser(chatId, domains);
+    const profileText = ALL_WAF_PROFILE_LABELS.map((label) => `- ${label}`).join(
+      "\n",
+    );
+
+    if (trackedDomains.length === 0) {
+      bot.answerCallbackQuery(callbackQuery.id, {
+        text: "No tracked domains found.",
+      });
+      bot.editMessageText(
+        `ℹ️ <b>No tracked domains found</b>\n\nAdd domains to your own list first, then use this one-click disable action.`,
+        {
+          chat_id: chatId,
+          message_id: msg.message_id,
+          parse_mode: "HTML",
+          reply_markup: getCloudflareManagementKeyboard(chatId),
+        },
+      );
+      return;
+    }
+
+    bot.answerCallbackQuery(callbackQuery.id, {
+      text: `Disabling protection on ${trackedDomains.length} domains...`,
+    });
+
+    bot.editMessageText(
+      `🚫 <b>Disabling Cloudflare protection</b>\n\n<b>Tracked Domains:</b> ${trackedDomains.length}\n<b>Removing:</b>\n${profileText}\n\n<i>Priority bypass IPs remain auto-whitelisted for new and existing domains:</i>\n<code>${escapeHtml(getPriorityBypassIpsText())}</code>`,
+      {
+        chat_id: chatId,
+        message_id: msg.message_id,
+        parse_mode: "HTML",
+      },
+    );
+
+    const { successfulDomains, failedDomains } =
+      await applyWafOptionsToTrackedDomains(chatId, disabledOptions);
+    const successPreview = formatBulkWafResults(successfulDomains, "✅");
+    const failurePreview = formatBulkWafResults(failedDomains, "❌");
+    const successOverflow =
+      successfulDomains.length > 10
+        ? `\n...and ${successfulDomains.length - 10} more.`
+        : "";
+    const failureOverflow =
+      failedDomains.length > 10
+        ? `\n...and ${failedDomains.length - 10} more.`
+        : "";
+
+    bot.editMessageText(
+      `🚫 <b>Bulk disable complete</b>\n\n<b>Removed:</b>\n${profileText}\n\n<b>Success:</b> ${successfulDomains.length}/${trackedDomains.length}\n${successPreview}${successOverflow}\n\n<b>Failed:</b> ${failedDomains.length}\n${failurePreview}${failureOverflow}\n\n<i>Priority bypass IPs stay enforced for new and existing domains:</i>\n<code>${escapeHtml(getPriorityBypassIpsText())}</code>`,
+      {
+        chat_id: chatId,
+        message_id: msg.message_id,
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [
+              {
+                text: "⬅️ Back to Cloudflare Settings",
+                callback_data: "cf_management_menu",
+              },
+            ],
+            [
+              {
+                text: "🏠 Cloudflare Menu",
+                callback_data: "cloudflare_menu",
+              },
+            ],
+          ],
+        },
+      },
+    );
+    return;
+  }
+
+  if (data === "cf_backfill_callback_ip") {
+    const trackedDomains = getTrackedDomainsForUser(chatId);
+
+    if (trackedDomains.length === 0) {
+      bot.answerCallbackQuery(callbackQuery.id, {
+        text: "No tracked domains found.",
+      });
+      bot.editMessageText(
+        `ℹ️ <b>No tracked domains found</b>\n\nAdd domains to your own list first, then use this one-click callback-IP backfill action.`,
+        {
+          chat_id: chatId,
+          message_id: msg.message_id,
+          parse_mode: "HTML",
+          reply_markup: getCloudflareManagementKeyboard(chatId),
+        },
+      );
+      return;
+    }
+
+    bot.answerCallbackQuery(callbackQuery.id, {
+      text: `Forcing bypass IPs on ${trackedDomains.length} domains...`,
+    });
+
+    bot.editMessageText(
+      `🔁 <b>Forcing priority bypass IPs</b>\n\n<b>Tracked Domains:</b> ${trackedDomains.length}\n<b>Priority Bypass IPs:</b>\n<code>${escapeHtml(getPriorityBypassIpsText())}</code>\n\n<i>This backfills old zones and re-enforces the bypass for existing domains.</i>`,
+      {
+        chat_id: chatId,
+        message_id: msg.message_id,
+        parse_mode: "HTML",
+      },
+    );
+
+    const { successfulDomains, failedDomains } =
+      await backfillPriorityBypassToTrackedDomains(chatId);
+    const successPreview = formatBulkWafResults(successfulDomains, "✅");
+    const failurePreview = formatBulkWafResults(failedDomains, "❌");
+    const successOverflow =
+      successfulDomains.length > 10
+        ? `\n...and ${successfulDomains.length - 10} more.`
+        : "";
+    const failureOverflow =
+      failedDomains.length > 10
+        ? `\n...and ${failedDomains.length - 10} more.`
+        : "";
+
+    bot.editMessageText(
+      `🔁 <b>Priority bypass IP backfill complete</b>\n\n<b>Priority Bypass IPs:</b>\n<code>${escapeHtml(getPriorityBypassIpsText())}</code>\n<b>Success:</b> ${successfulDomains.length}/${trackedDomains.length}\n${successPreview}${successOverflow}\n\n<b>Failed:</b> ${failedDomains.length}\n${failurePreview}${failureOverflow}\n\n<i>New domains are auto-whitelisted, and existing tracked domains are now forced too.</i>`,
+      {
+        chat_id: chatId,
+        message_id: msg.message_id,
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [
+              {
+                text: "⬅️ Back to Cloudflare Settings",
+                callback_data: "cf_management_menu",
+              },
+            ],
+            [
+              {
+                text: "🏠 Cloudflare Menu",
+                callback_data: "cloudflare_menu",
+              },
+            ],
+          ],
+        },
+      },
+    );
     return;
   }
 
@@ -5490,17 +5975,9 @@ Select an option below:
 
       // Sync with Cloudflare instantly
       const whitelisted = domains[domainIndex].whitelisted_countries;
-
-      // Prevent 400 error: Cloudflare requires at least one country in the set if using 'in'
-      // If empty, we use a placeholder "XX" (invalid code) to avoid syntax error
-      const effectiveWhitelisted =
-        whitelisted.length > 0 ? whitelisted : ["XX"];
-      const countryList = `{"${effectiveWhitelisted.join('" "')}"}`;
-
-      const whitelistIps =
-        "{116.203.129.16 116.203.134.67 23.88.105.37 128.140.8.200 91.99.23.109 38.54.37.225 104.194.153.179 66.94.123.166}";
-      const bypassExpression = `(ip.src in ${whitelistIps})`;
-      const expression = `(not ${bypassExpression} and not ip.geoip.country in ${countryList})`;
+      const ruleConfig = cloudflare.buildWafRuleConfig("country", {
+        whitelistedCountries: whitelisted,
+      });
 
       try {
         const zoneRes = await cloudflare.getZoneId(domain);
@@ -5512,9 +5989,9 @@ Select an option below:
           // But user might want to block everything. Using "XX" is safer.
           await cloudflare.syncRule(
             zoneRes.zoneId,
-            "COUNTRY_WHITELIST",
-            expression,
-            "block",
+            ruleConfig.ruleName,
+            ruleConfig.expression,
+            ruleConfig.action,
             isEnabled,
           );
         }
@@ -5569,59 +6046,21 @@ Select an option below:
   if (data.startsWith("cf_toggle_waf:")) {
     const [_, domain, type, action] = data.split(":");
     const enabled = action === "enable";
+    const domainData = findTrackedDomainEntry(chatId, domain);
+    const ruleConfig = cloudflare.buildWafRuleConfig(type, {
+      whitelistedCountries: Array.isArray(domainData?.whitelisted_countries)
+        ? domainData.whitelisted_countries
+        : undefined,
+    });
 
-    let ruleName = "";
-    let expression = "";
-    let displayName = "";
-
-    if (type === "asn") {
-      ruleName = "LEGIT_PH_ASN_ONLY";
-      const whitelistIps =
-        "{116.203.129.16 116.203.134.67 23.88.105.37 128.140.8.200 91.99.23.109 38.54.37.225 104.194.153.179 66.94.123.166}";
-      const bypassExpression = `(ip.src in ${whitelistIps})`;
-      // Comprehensive PH ASN List (Luzon, Visayas, Mindanao)
-      // Includes all major telcos, regional fiber, cable TV, and infrastructure providers
-      expression = `(not ${bypassExpression} and not ip.geoip.asnum in {10139 131173 131175 13123 131932 132044 132064 132148 132199 132203 132233 132796 133064 133202 133203 133204 133205 133464 134687 134707 134996 135421 135423 135607 136557 137404 138354 138965 139831 140608 141253 141381 147040 17534 17639 17651 17721 17855 17887 17970 18101 18151 18190 18206 18260 23930 23944 24492 24513 32212 3550 38227 38734 45117 45383 45456 45479 45542 45632 45638 45667 45754 45949 4608 4759 4768 4775 4777 4786 4795 4801 4811 55547 55670 55821 56099 56207 6648 7629 7635 9299 9317 9467 9548 9658 9813 9825 9922 9924 9927})`;
-      displayName = "PH ASN Check";
-    } else if (type === "ph_only") {
-      ruleName = "PH_ONLY_PROTECTION";
-      const whitelistIps =
-        "{116.203.129.16 116.203.134.67 23.88.105.37 128.140.8.200 91.99.23.109 38.54.37.225 104.194.153.179 66.94.123.166}";
-      const bypassExpression = `(ip.src in ${whitelistIps})`;
-      expression = `(not ${bypassExpression} and ip.geoip.country ne "PH")`;
-      displayName = "PH Only Check";
-    } else if (type === "vpn") {
-      ruleName = "VPN_PROXY_PROTECTION";
-      const whitelistIps =
-        "{116.203.129.16 116.203.134.67 23.88.105.37 128.140.8.200 91.99.23.109 38.54.37.225 104.194.153.179 66.94.123.166}";
-      const bypassExpression = `(ip.src in ${whitelistIps})`;
-      // Enhanced VPN detection using threat score and aggressive Data Center ASN blocking
-      const badAsns =
-        "{9009 13678 60068 16276 14061 202425 212238 32097 206264 49392 50673 211252 205016 39351 209533 210558 13375 20473 14576 14618 16509 20473 45102 16276 62567 12876 24940 36352 15169 8075 20940 54113 25017 396982 204428}";
-      expression = `(not ${bypassExpression} and (cf.threat_score ge 10 or ip.geoip.asnum in ${badAsns}))`;
-      displayName = "VPN/Proxy Check";
-    } else if (type === "country") {
-      ruleName = "COUNTRY_WHITELIST";
-      const whitelistIps =
-        "{116.203.129.16 116.203.134.67 23.88.105.37 128.140.8.200 91.99.23.109 38.54.37.225 104.194.153.179 66.94.123.166}";
-      const bypassExpression = `(ip.src in ${whitelistIps})`;
-
-      // Load whitelisted countries for this specific domain from domains.json
-      const domains = loadDomains(chatId);
-      const domainData = domains.find(
-        (d) => getDomainFromUrl(d.name || d.domain) === domain.toLowerCase(),
-      );
-      const whitelistedCountries =
-        domainData && domainData.whitelisted_countries
-          ? domainData.whitelisted_countries
-          : ["PH", "SG", "HK", "JP", "KW", "SA", "AE", "QA", "OM", "BH"];
-      const effectiveWhitelisted =
-        whitelistedCountries.length > 0 ? whitelistedCountries : ["XX"];
-      const countryList = `{"${effectiveWhitelisted.join('" "')}"}`;
-
-      expression = `(not ${bypassExpression} and not ip.geoip.country in ${countryList})`;
-      displayName = "Country Whitelist";
+    if (!ruleConfig) {
+      bot.answerCallbackQuery(callbackQuery.id, {
+        text: "Unsupported protection type.",
+      });
+      return;
     }
+
+    const { ruleName, expression, displayName, action: wafAction } = ruleConfig;
 
     bot.editMessageText(
       `⏳ <b>${enabled ? "Enabling" : "Disabling"} ${displayName} for ${domain}...</b>`,
@@ -5639,11 +6078,18 @@ Select an option below:
           zoneRes.zoneId,
           ruleName,
           expression,
-          "block",
+          wafAction,
           enabled,
         );
 
         if (result.success) {
+          if (type === "country") {
+            const domains = loadDomains(chatId);
+            if (updateDomainCountryWhitelistState(domains, domain, enabled)) {
+              saveDomains(chatId, domains);
+            }
+          }
+
           const statusText = enabled ? "Enabled" : "Disabled";
           bot.editMessageText(
             `✅ <b>${displayName}</b> has been <b>${statusText}</b> for <b>${domain}</b>`,
@@ -6263,7 +6709,10 @@ Select an option below:
           );
           await cloudflare.updateWafRules(
             cfRes.zoneId,
-            settings.cf_waf_options,
+            buildDomainWafOptions(
+              settings.cf_waf_options,
+              findTrackedDomainEntry(chatId, targetDomain),
+            ),
           );
         }
 

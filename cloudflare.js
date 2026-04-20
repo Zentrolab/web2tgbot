@@ -7,11 +7,191 @@ const CF_API_KEY = process.env.CF_API_KEY;
 const TARGET_IP = process.env.TARGET_SERVER_IP;
 
 const BASE_URL = 'https://api.cloudflare.com/client/v4';
+const DEFAULT_COUNTRY_WHITELIST = ['PH', 'SG', 'HK', 'JP', 'KW', 'SA', 'AE', 'QA', 'OM', 'BH'];
+const DEFAULT_VPN_BLOCKED_ASNS = [9009, 13678, 60068, 16276, 14061, 202425, 212238, 32097, 206264, 49392, 50673, 211252, 205016, 39351, 209533, 210558, 13375, 20473, 14576, 14618, 16509, 20473, 45102, 16276, 62567, 12876, 24940, 36352, 15169, 8075, 20940, 54113, 25017, 396982, 204428];
+const LEGIT_PH_ASNS = [10139, 131173, 131175, 13123, 131932, 132044, 132064, 132148, 132199, 132203, 132233, 132796, 133064, 133202, 133203, 133204, 133205, 133464, 134687, 134707, 134996, 135421, 135423, 135607, 136557, 137404, 138354, 138965, 139831, 140608, 141253, 141381, 147040, 17534, 17639, 17651, 17721, 17855, 17887, 17970, 18101, 18151, 18190, 18206, 18260, 23930, 23944, 24492, 24513, 32212, 3550, 38227, 38734, 45117, 45383, 45456, 45479, 45542, 45632, 45638, 45667, 45754, 45949, 4608, 4759, 4768, 4775, 4777, 4786, 4795, 4801, 4811, 55547, 55670, 55821, 56099, 56207, 6648, 7629, 7635, 9299, 9317, 9467, 9548, 9658, 9813, 9825, 9922, 9924, 9927];
 
 const headers = {
     'X-Auth-Email': CF_EMAIL,
     'X-Auth-Key': CF_API_KEY,
     'Content-Type': 'application/json'
+};
+
+const formatCfSet = (values) => `{${values.join(' ')}}`;
+
+const formatCountrySet = (countries) => `{"${countries.join('" "')}"}`;
+
+const parseIpList = (value = '') =>
+    String(value || '')
+        .split(',')
+        .map((ip) => ip.trim())
+        .filter(Boolean);
+
+const parseNumericList = (value = '') =>
+    String(value || '')
+        .split(',')
+        .map((item) => Number(item.trim()))
+        .filter((item) => Number.isInteger(item) && item > 0);
+
+const uniqueIps = (ips) => [...new Set(ips.filter(Boolean))];
+
+const uniqueNumbers = (items) => [...new Set(items.filter((item) => Number.isInteger(item) && item > 0))];
+
+const getServerBypassIps = () =>
+    uniqueIps([TARGET_IP, process.env.SSH_HOST].filter(Boolean));
+
+const getPriorityBypassIps = () =>
+    uniqueIps([
+        ...parseIpList(process.env.CF_PRIORITY_BYPASS_IPS),
+        ...getServerBypassIps()
+    ]);
+
+const getWafBypassIps = () =>
+    uniqueIps([
+        ...getPriorityBypassIps(),
+        ...parseIpList(process.env.CF_WAF_BYPASS_IPS)
+    ]);
+
+const getVpnBlockedAsns = () => {
+    const envAsns = uniqueNumbers(parseNumericList(process.env.CF_VPN_BLOCKED_ASNS));
+    return envAsns.length > 0 ? envAsns : DEFAULT_VPN_BLOCKED_ASNS;
+};
+
+const getEffectiveWhitelistedCountries = (whitelistedCountries) => {
+    if (!Array.isArray(whitelistedCountries)) {
+        return DEFAULT_COUNTRY_WHITELIST;
+    }
+
+    return whitelistedCountries.length > 0 ? whitelistedCountries : ['XX'];
+};
+
+const buildWafRuleConfig = (type, options = {}) => {
+    const bypassIps = getWafBypassIps();
+    const bypassExpression = bypassIps.length > 0
+        ? `(ip.src in ${formatCfSet(bypassIps)})`
+        : null;
+    const withBypass = (condition) =>
+        bypassExpression ? `(not ${bypassExpression} and ${condition})` : `(${condition})`;
+
+    if (type === 'ph_only') {
+        return {
+            ruleName: 'PH_ONLY_PROTECTION',
+            expression: withBypass('ip.geoip.country ne "PH"'),
+            action: 'block',
+            displayName: 'PH Only Check'
+        };
+    }
+
+    if (type === 'vpn') {
+        const vpnBlockedAsns = getVpnBlockedAsns();
+        return {
+            ruleName: 'VPN_PROXY_PROTECTION',
+            expression: withBypass(`ip.geoip.asnum in ${formatCfSet(vpnBlockedAsns)}`),
+            action: 'block',
+            displayName: 'VPN/Proxy Check'
+        };
+    }
+
+    if (type === 'asn') {
+        return {
+            ruleName: 'LEGIT_PH_ASN_ONLY',
+            expression: withBypass(`not ip.geoip.asnum in ${formatCfSet(LEGIT_PH_ASNS)}`),
+            action: 'block',
+            displayName: 'PH ASN Check'
+        };
+    }
+
+    if (type === 'country') {
+        const effectiveWhitelisted = getEffectiveWhitelistedCountries(
+            options.whitelistedCountries
+        );
+
+        return {
+            ruleName: 'COUNTRY_WHITELIST',
+            expression: withBypass(`not ip.geoip.country in ${formatCountrySet(effectiveWhitelisted)}`),
+            action: 'block',
+            displayName: 'Country Whitelist'
+        };
+    }
+
+    return null;
+};
+
+const ensureZoneIpAccessRule = async (zoneId, ip, notes = 'Auto bypass IP via env config') => {
+    try {
+        const response = await axios.get(
+            `${BASE_URL}/zones/${zoneId}/firewall/access_rules/rules`,
+            {
+                headers,
+                params: {
+                    'configuration.target': 'ip',
+                    'configuration.value': ip,
+                    per_page: 100
+                }
+            }
+        );
+
+        const existingRule = response.data.success
+            ? response.data.result.find(
+                (rule) =>
+                    rule.configuration?.target === 'ip' &&
+                    rule.configuration?.value === ip
+            )
+            : null;
+        const payload = {
+            mode: 'whitelist',
+            configuration: {
+                target: 'ip',
+                value: ip
+            },
+            notes
+        };
+
+        if (existingRule) {
+            if (existingRule.mode === 'whitelist') {
+                return { success: true, skipped: true };
+            }
+
+            const ruleId = existingRule.id || existingRule.identifier;
+            const updateResponse = await axios.patch(
+                `${BASE_URL}/zones/${zoneId}/firewall/access_rules/rules/${ruleId}`,
+                payload,
+                { headers }
+            );
+
+            return { success: updateResponse.data.success, updated: true };
+        }
+
+        const createResponse = await axios.post(
+            `${BASE_URL}/zones/${zoneId}/firewall/access_rules/rules`,
+            payload,
+            { headers }
+        );
+
+        return { success: createResponse.data.success, created: true };
+    } catch (error) {
+        const msg = error.response?.data?.errors?.[0]?.message || error.message;
+        return { success: false, message: msg };
+    }
+};
+
+const ensurePriorityBypassIps = async (zoneId, ips = getPriorityBypassIps()) => {
+    if (!zoneId) {
+        return { success: false, message: 'No Zone ID provided' };
+    }
+
+    const effectiveIps = Array.isArray(ips) ? uniqueIps(ips) : getPriorityBypassIps();
+    if (effectiveIps.length === 0) {
+        return { success: true, skipped: true, results: [] };
+    }
+
+    const results = [];
+    for (const ip of effectiveIps) {
+        results.push(await ensureZoneIpAccessRule(zoneId, ip));
+    }
+
+    const failed = results.find((result) => !result.success);
+    return failed ? failed : { success: true, results };
 };
 
 /**
@@ -25,10 +205,17 @@ const addZone = async (domain) => {
         }, { headers });
 
         if (response.data.success) {
+            const bypassResult = await ensurePriorityBypassIps(response.data.result.id);
+            if (!bypassResult.success) {
+                console.error(`[CF_ERROR] ensurePriorityBypassIps addZone ${domain}:`, bypassResult.message);
+            }
+
             return {
                 success: true,
                 zoneId: response.data.result.id,
-                nameservers: response.data.result.name_servers
+                nameservers: response.data.result.name_servers,
+                callbackBypassApplied: bypassResult.success,
+                callbackBypassMessage: bypassResult.success ? '' : bypassResult.message
             };
         }
         return { success: false, message: response.data.errors[0].message };
@@ -198,6 +385,10 @@ const autoSetup = async (domain, ip = TARGET_IP) => {
 
     console.log(`📍 Setting DNS A-Record to ${ip}...`);
     const dnsRes = await setDnsRecord(zoneId, domain, ip);
+    const bypassResult = await ensurePriorityBypassIps(zoneId);
+    if (!bypassResult.success) {
+        console.error(`[CF_ERROR] ensurePriorityBypassIps autoSetup ${domain}:`, bypassResult.message);
+    }
     
     return {
         success: dnsRes.success,
@@ -205,7 +396,9 @@ const autoSetup = async (domain, ip = TARGET_IP) => {
         zoneId: zoneId,
         ip: ip,
         nameservers: nameservers,
-        message: dnsRes.success ? 'Domain added and pointed to IP successfully!' : dnsRes.message
+        message: dnsRes.success ? 'Domain added and pointed to IP successfully!' : dnsRes.message,
+        callbackBypassApplied: bypassResult.success,
+        callbackBypassMessage: bypassResult.success ? '' : bypassResult.message
     };
 };
 
@@ -229,9 +422,16 @@ const setSecurityLevel = async (zoneId, level = 'under_attack') => {
 /**
  * 6. Sync Firewall Rule
  */
-const syncRule = async (zoneId, ruleName, expression, action, enabled) => {
+const syncRule = async (zoneId, ruleName, expression, action, enabled, enforcePriorityBypass = true) => {
     try {
         console.log(`[CF] syncRule: ${ruleName}, enabled: ${enabled}`);
+
+        if (enforcePriorityBypass) {
+            const bypassResult = await ensurePriorityBypassIps(zoneId);
+            if (!bypassResult.success) {
+                return bypassResult;
+            }
+        }
 
         // Find existing rule
         const response = await axios.get(`${BASE_URL}/zones/${zoneId}/firewall/rules`, { headers });
@@ -316,34 +516,41 @@ const updateWafRules = async (zoneId, options = {}) => {
         enableVpnBlocking = false, 
         enableAsnWhitelist = false,
         enableCountryWhitelist = false,
-        whitelistedCountries = []
+        whitelistedCountries
     } = options;
 
     console.log(`[CF] updateWafRules:`, { zoneId, enablePhOnly, enableVpnBlocking, enableAsnWhitelist, enableCountryWhitelist, whitelistedCountries });
 
     if (!zoneId) return { success: false, message: 'No Zone ID provided' };
 
+    const bypassResult = await ensurePriorityBypassIps(zoneId);
+    if (!bypassResult.success) {
+        return bypassResult;
+    }
+
     const results = [];
-    const whitelistIps = '{116.203.129.16 116.203.134.67 23.88.105.37 128.140.8.200 91.99.23.109 38.54.37.225 104.194.153.179 66.94.123.166}';
-    const bypassExpression = `(ip.src in ${whitelistIps})`;
+    const ruleConfigs = [
+        { enabled: enablePhOnly, config: buildWafRuleConfig('ph_only') },
+        { enabled: enableVpnBlocking, config: buildWafRuleConfig('vpn') },
+        { enabled: enableAsnWhitelist, config: buildWafRuleConfig('asn') },
+        {
+            enabled: enableCountryWhitelist,
+            config: buildWafRuleConfig('country', { whitelistedCountries })
+        }
+    ];
 
-    // 1. PH Only Rule
-    results.push(await syncRule(zoneId, 'PH_ONLY_PROTECTION', `(not ${bypassExpression} and ip.geoip.country ne "PH")`, 'block', enablePhOnly));
-
-    // 2. VPN/Proxy Rule (Enhanced with aggressive Data Center ASN blocking)
-    // - cf.threat_score >= 10: High IP reputation risk
-    // - Aggressive block of major VPN/Data Center ASNs (M247, NordVPN, OVH, DigitalOcean, etc.)
-    const badAsns = '{9009 13678 60068 16276 14061 202425 212238 32097 206264 49392 50673 211252 205016 39351 209533 210558 13375 20473 14576 14618 16509 20473 45102 16276 62567 12876 24940 36352 15169 8075 20940 54113 25017 396982 204428}';
-    results.push(await syncRule(zoneId, 'VPN_PROXY_PROTECTION', `(not ${bypassExpression} and (cf.threat_score ge 10 or ip.geoip.asnum in ${badAsns}))`, 'block', enableVpnBlocking));
-
-    // 3. Legit PH ASN Only Rule (Comprehensive list covering Luzon, Visayas, and Mindanao)
-    const legitAsns = '{10139 131173 131175 13123 131932 132044 132064 132148 132199 132203 132233 132796 133064 133202 133203 133204 133205 133464 134687 134707 134996 135421 135423 135607 136557 137404 138354 138965 139831 140608 141253 141381 147040 17534 17639 17651 17721 17855 17887 17970 18101 18151 18190 18206 18260 23930 23944 24492 24513 32212 3550 38227 38734 45117 45383 45456 45479 45542 45632 45638 45667 45754 45949 4608 4759 4768 4775 4777 4786 4795 4801 4811 55547 55670 55821 56099 56207 6648 7629 7635 9299 9317 9467 9548 9658 9813 9825 9922 9924 9927}';
-    results.push(await syncRule(zoneId, 'LEGIT_PH_ASN_ONLY', `(not ${bypassExpression} and not ip.geoip.asnum in ${legitAsns})`, 'block', enableAsnWhitelist));
-
-    // 4. Country Whitelist Rule (Customizable list of countries)
-    const effectiveWhitelisted = whitelistedCountries.length > 0 ? whitelistedCountries : ["XX"];
-    const countryList = `{"${effectiveWhitelisted.join('" "')}"}`;
-    results.push(await syncRule(zoneId, 'COUNTRY_WHITELIST', `(not ${bypassExpression} and not ip.geoip.country in ${countryList})`, 'block', enableCountryWhitelist));
+    for (const ruleConfig of ruleConfigs) {
+        results.push(
+            await syncRule(
+                zoneId,
+                ruleConfig.config.ruleName,
+                ruleConfig.config.expression,
+                ruleConfig.config.action,
+                ruleConfig.enabled,
+                false
+            )
+        );
+    }
 
     const failed = results.find(r => !r.success);
     return failed ? failed : { success: true };
@@ -386,5 +593,10 @@ module.exports = {
     setSecurityLevel,
     updateWafRules,
     getWafStatus,
-    syncRule
+    syncRule,
+    buildWafRuleConfig,
+    DEFAULT_COUNTRY_WHITELIST,
+    ensurePriorityBypassIps,
+    getPriorityBypassIps,
+    getWafBypassIps
 };
