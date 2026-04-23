@@ -7352,6 +7352,8 @@ Select an option below:
         const remotePath = `/tmp/${fileName}`;
 
         await new Promise((resolve, reject) => {
+          const sshConfig = serverManager.getSshConfig();
+
           conn
             .on("ready", () => {
               conn.sftp((err, sftp) => {
@@ -7368,12 +7370,7 @@ Select an option below:
                 });
               });
             })
-            .connect({
-              host: process.env.SSH_HOST,
-              port: 22,
-              username: process.env.SSH_USER,
-              password: process.env.SSH_PASS,
-            });
+            .connect(sshConfig);
         });
 
         // 3. Deploy on Server with progress updates
@@ -7474,6 +7471,8 @@ Select an option below:
         const remotePath = `/tmp/${fileName}`;
 
         await new Promise((resolve, reject) => {
+          const sshConfig = serverManager.getSshConfig();
+
           conn
             .on("ready", () => {
               conn.sftp((err, sftp) => {
@@ -7489,12 +7488,7 @@ Select an option below:
                 });
               });
             })
-            .connect({
-              host: process.env.SSH_HOST,
-              port: 22,
-              username: process.env.SSH_USER,
-              password: process.env.SSH_PASS,
-            });
+            .connect(sshConfig);
         });
 
         // 3. Create DB & Import

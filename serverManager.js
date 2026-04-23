@@ -5,12 +5,41 @@ const axios = require('axios');
 const CRON_JOB_ORG_API_KEY = process.env.CRON_JOB_ORG_API_KEY;
 const CRON_JOB_ORG_BASE_URL = 'https://api.cron-job.org';
 
-const config = {
-    host: process.env.SSH_HOST,
-    port: process.env.SSH_PORT || 22,
-    username: process.env.SSH_USER,
-    password: process.env.SSH_PASS
+const requireEnv = (name) => {
+    const value = process.env[name];
+    if (!value) {
+        throw new Error(`${name} is required for SSH authentication`);
+    }
+    return value;
 };
+
+const normalizePrivateKey = (privateKey) => {
+    let normalized = privateKey.trim();
+
+    if (
+        (normalized.startsWith('"') && normalized.endsWith('"')) ||
+        (normalized.startsWith("'") && normalized.endsWith("'"))
+    ) {
+        normalized = normalized.slice(1, -1);
+    }
+
+    normalized = normalized.replace(/\r\n/g, '\n').replace(/\\n/g, '\n');
+
+    if (!normalized.endsWith('\n')) {
+        normalized += '\n';
+    }
+
+    return normalized;
+};
+
+const getSshConfig = () => ({
+    host: requireEnv('SSH_HOST'),
+    port: Number(process.env.SSH_PORT || 22),
+    username: requireEnv('SSH_USER'),
+    privateKey: normalizePrivateKey(requireEnv('SSH_PRIVATE_KEY')),
+});
+
+const config = getSshConfig();
 
 /**
  * Timestamped logger for debug
@@ -27,7 +56,7 @@ const execCommand = (command) => {
     const startTime = Date.now();
     console.log(`${ts()} [EXEC] ──────────────────────────────────────`);
     console.log(`${ts()} [EXEC] Command: ${command}`);
-    console.log(`${ts()} [EXEC] SSH Config: host=${config.host}, port=${config.port}, user=${config.username}`);
+    console.log(`${ts()} [EXEC] SSH Config: host=${config.host}, port=${config.port}, user=${config.username}, auth=privateKey`);
 
     return new Promise((resolve, reject) => {
         const conn = new Client();
@@ -225,7 +254,7 @@ const cloneSiteFiles = async (sourceDomain, targetDomain) => {
  */
 const checkConnection = async () => {
     console.log(`${ts()} [SSH_CHECK] Testing SSH connection...`);
-    console.log(`${ts()} [SSH_CHECK] Host: ${config.host}, Port: ${config.port}, User: ${config.username}`);
+    console.log(`${ts()} [SSH_CHECK] Host: ${config.host}, Port: ${config.port}, User: ${config.username}, Auth: privateKey`);
     try {
         const res = await execCommand('echo "Ready"');
         const isReady = res.success && res.output.trim() === 'Ready';
@@ -494,7 +523,7 @@ const uploadFile = (sourcePath, remotePath, onProgress) => {
     console.log(`${ts()} [SFTP_UPLOAD] ══════════════════════════════════`);
     console.log(`${ts()} [SFTP_UPLOAD] Source: ${sourcePath}`);
     console.log(`${ts()} [SFTP_UPLOAD] Remote: ${remotePath}`);
-    console.log(`${ts()} [SFTP_UPLOAD] SSH Config: host=${config.host}, port=${config.port}, user=${config.username}`);
+    console.log(`${ts()} [SFTP_UPLOAD] SSH Config: host=${config.host}, port=${config.port}, user=${config.username}, auth=privateKey`);
 
     return new Promise((resolve, reject) => {
         // Check if source file exists
@@ -982,6 +1011,7 @@ module.exports = {
     addCronJob,
     cronJobOrg,
     getAdminPrefix,
+    getSshConfig,
     // Cloudzy VPS functions
     listCloudzyInstances,
     getCloudzyInstance,
