@@ -1,4 +1,4 @@
-const { File, Storage } = require('megajs');
+const { API, File, Storage } = require('megajs');
 const fs = require('fs');
 const path = require('path');
 
@@ -10,6 +10,82 @@ class MegaService {
         this.folderUrl = process.env.MEGA_FOLDER_URL;
         this.email = process.env.MEGA_EMAIL;
         this.password = process.env.MEGA_PASSWORD;
+        this.requestTimeoutMs = this._getRequestTimeoutMs();
+    }
+
+    _getRequestTimeoutMs() {
+        const configuredTimeout = Number(process.env.MEGA_REQUEST_TIMEOUT_MS || 45000);
+        return Number.isFinite(configuredTimeout) && configuredTimeout > 0 ? configuredTimeout : 45000;
+    }
+
+    _normalizeFolderUrl() {
+        const configuredUrl = process.env.MEGA_FOLDER_URL || this.folderUrl;
+
+        if (!configuredUrl) {
+            throw new Error('MEGA_FOLDER_URL is not defined in .env');
+        }
+
+        let normalizedUrl = configuredUrl.trim();
+
+        if ((normalizedUrl.startsWith('"') && normalizedUrl.endsWith('"')) || (normalizedUrl.startsWith("'") && normalizedUrl.endsWith("'"))) {
+            normalizedUrl = normalizedUrl.slice(1, -1);
+        }
+
+        if (!normalizedUrl.includes('#')) {
+            throw new Error('MEGA_FOLDER_URL is missing the decryption key (the part after #). Please verify the full folder URL is set.');
+        }
+
+        return normalizedUrl;
+    }
+
+    async _megaFetch(url, options = {}) {
+        const timeoutMs = this._getRequestTimeoutMs();
+        const timeoutController = new AbortController();
+        const upstreamSignal = options.signal;
+
+        const relayAbort = () => {
+            if (!timeoutController.signal.aborted) {
+                timeoutController.abort(upstreamSignal?.reason || new Error('MEGA request aborted'));
+            }
+        };
+
+        const timeoutId = setTimeout(() => {
+            if (!timeoutController.signal.aborted) {
+                timeoutController.abort(new Error(`MEGA request timed out after ${timeoutMs}ms`));
+            }
+        }, timeoutMs);
+
+        if (upstreamSignal) {
+            if (upstreamSignal.aborted) {
+                relayAbort();
+            } else {
+                upstreamSignal.addEventListener('abort', relayAbort, { once: true });
+            }
+        }
+
+        try {
+            return await fetch(url, {
+                ...options,
+                signal: timeoutController.signal,
+            });
+        } catch (error) {
+            if (timeoutController.signal.aborted && !(upstreamSignal && upstreamSignal.aborted)) {
+                throw new Error(`MEGA request timed out after ${timeoutMs}ms`);
+            }
+            throw error;
+        } finally {
+            clearTimeout(timeoutId);
+            if (upstreamSignal) {
+                upstreamSignal.removeEventListener('abort', relayAbort);
+            }
+        }
+    }
+
+    _createApi() {
+        return new API(false, {
+            fetch: this._megaFetch.bind(this),
+            userAgent: 'telegrambot',
+        });
     }
 
     /**
@@ -24,14 +100,27 @@ class MegaService {
             const storage = new Storage({
                 email: this.email,
                 password: this.password,
-                autologin: true
+                autologin: true,
+                keepalive: false,
+                fetch: this._megaFetch.bind(this),
+                userAgent: 'telegrambot',
             });
 
+            const timeoutMs = this._getRequestTimeoutMs();
+            const timeoutId = setTimeout(() => {
+                storage.close().catch(() => {});
+                reject(new Error(`MEGA authentication timed out after ${timeoutMs}ms`));
+            }, timeoutMs);
+
+            const cleanup = () => clearTimeout(timeoutId);
+
             storage.on('ready', () => {
+                cleanup();
                 resolve(storage);
             });
 
             storage.on('error', (err) => {
+                cleanup();
                 reject(err);
             });
         });
@@ -40,18 +129,20 @@ class MegaService {
     /**
      * Load folder attributes with timeout and retry
      */
-    async _loadFolderWithRetry(url, retries = 2, timeoutMs = 15000) {
+    async _loadFolderWithRetry(url, retries = 2, timeoutMs = this._getRequestTimeoutMs()) {
         for (let attempt = 0; attempt <= retries; attempt++) {
+            const api = this._createApi();
             try {
-                const folder = File.fromURL(url);
+                const folder = File.fromURL(url, { api });
                 await Promise.race([
                     folder.loadAttributes(),
                     new Promise((_, reject) =>
                         setTimeout(() => reject(new Error('MEGA loadAttributes timed out')), timeoutMs)
                     )
                 ]);
-                return folder;
+                return { folder, api };
             } catch (err) {
+                api.close();
                 const isLastAttempt = attempt === retries;
                 // Catch the cryptic megajs decryption error
                 if (err.message && err.message.includes("Cannot read properties of undefined")) {
@@ -82,33 +173,27 @@ class MegaService {
 
         try {
             // Re-read from env to ensure we have the latest if it changed
-            let url = process.env.MEGA_FOLDER_URL;
-            
-            // Strip surrounding quotes if present (common .env misconfiguration)
-            if ((url.startsWith('"') && url.endsWith('"')) || (url.startsWith("'") && url.endsWith("'"))) {
-                url = url.slice(1, -1);
+            const url = this._normalizeFolderUrl();
+            const { folder, api } = await this._loadFolderWithRetry(url);
+
+            try {
+                if (!folder.children) {
+                    throw new Error('The provided MEGA link is not a folder or has no accessible files.');
+                }
+
+                // Filter for .zip files
+                const files = folder.children
+                    .filter(file => !file.directory && file.name.toLowerCase().endsWith('.zip'))
+                    .map(file => ({
+                        name: file.name,
+                        size: file.size,
+                        handle: file.handle
+                    }));
+
+                return files;
+            } finally {
+                api.close();
             }
-
-            if (!url.includes('#')) {
-                throw new Error('MEGA_FOLDER_URL is missing the decryption key (the part after #). Please wrap the URL in double quotes in your .env file.');
-            }
-
-            const folder = await this._loadFolderWithRetry(url);
-            
-            if (!folder.children) {
-                throw new Error('The provided MEGA link is not a folder or has no accessible files.');
-            }
-
-            // Filter for .zip files
-            const files = folder.children
-                .filter(file => !file.directory && file.name.toLowerCase().endsWith('.zip'))
-                .map(file => ({
-                    name: file.name,
-                    size: file.size,
-                    handle: file.handle
-                }));
-
-            return files;
         } catch (error) {
             console.error('Error listing MEGA templates:', error);
             throw error;
@@ -126,44 +211,84 @@ class MegaService {
         }
 
         try {
-            let url = process.env.MEGA_FOLDER_URL;
-            // Strip surrounding quotes if present
-            if ((url.startsWith('"') && url.endsWith('"')) || (url.startsWith("'") && url.endsWith("'"))) {
-                url = url.slice(1, -1);
-            }
-            if (!url.includes('#')) {
-                throw new Error('MEGA_FOLDER_URL is missing the decryption key (the part after #).');
-            }
+            const url = this._normalizeFolderUrl();
+            const { folder, api } = await this._loadFolderWithRetry(url);
 
-            const folder = await this._loadFolderWithRetry(url);
+            try {
+                if (!folder.children) {
+                    throw new Error('The provided MEGA link is not a folder.');
+                }
 
-            if (!folder.children) {
-                throw new Error('The provided MEGA link is not a folder.');
-            }
+                const file = folder.children.find(f => f.name === fileName);
+                if (!file) {
+                    throw new Error(`File ${fileName} not found in MEGA folder`);
+                }
 
-            const file = folder.children.find(f => f.name === fileName);
-            if (!file) {
-                throw new Error(`File ${fileName} not found in MEGA folder`);
-            }
+                return await new Promise((resolve, reject) => {
+                    const downloadStream = file.download();
+                    const writeStream = fs.createWriteStream(targetPath);
+                    const timeoutMs = this._getRequestTimeoutMs();
+                    let finished = false;
+                    let timeoutId = null;
 
-            return new Promise((resolve, reject) => {
-                const downloadStream = file.download();
-                const writeStream = fs.createWriteStream(targetPath);
+                    const cleanup = () => {
+                        if (timeoutId) {
+                            clearTimeout(timeoutId);
+                        }
+                    };
 
-                downloadStream.pipe(writeStream);
+                    const resetTimeout = () => {
+                        if (timeoutId) {
+                            clearTimeout(timeoutId);
+                        }
+                        timeoutId = setTimeout(() => {
+                            if (finished) {
+                                return;
+                            }
+                            finished = true;
+                            downloadStream.destroy(new Error(`MEGA download timed out after ${timeoutMs}ms`));
+                            writeStream.destroy(new Error(`MEGA download timed out after ${timeoutMs}ms`));
+                            reject(new Error(`MEGA download timed out after ${timeoutMs}ms`));
+                        }, timeoutMs);
+                    };
 
-                writeStream.on('finish', () => {
-                    resolve(targetPath);
+                    downloadStream.pipe(writeStream);
+                    resetTimeout();
+
+                    downloadStream.on('data', () => {
+                        resetTimeout();
+                    });
+
+                    writeStream.on('finish', () => {
+                        if (finished) {
+                            return;
+                        }
+                        finished = true;
+                        cleanup();
+                        resolve(targetPath);
+                    });
+
+                    writeStream.on('error', (err) => {
+                        if (finished) {
+                            return;
+                        }
+                        finished = true;
+                        cleanup();
+                        reject(err);
+                    });
+
+                    downloadStream.on('error', (err) => {
+                        if (finished) {
+                            return;
+                        }
+                        finished = true;
+                        cleanup();
+                        reject(err);
+                    });
                 });
-
-                writeStream.on('error', (err) => {
-                    reject(err);
-                });
-
-                downloadStream.on('error', (err) => {
-                    reject(err);
-                });
-            });
+            } finally {
+                api.close();
+            }
         } catch (error) {
             console.error(`Error downloading ${fileName} from MEGA:`, error);
             throw error;
